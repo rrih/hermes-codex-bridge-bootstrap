@@ -1,0 +1,352 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+REPO_URL="${REPO_URL:-https://github.com/rrih/hermes-codex-bridge-bootstrap.git}"
+HERMES_REF="${HERMES_REF:-main}"
+HERMES_HOME="${HERMES_HOME:-${HOME}/.hermes}"
+HERMES_BIN="${HERMES_BIN:-${HOME}/.local/bin/hermes}"
+HERMES_MODEL="${HERMES_MODEL:-gpt-5.5}"
+HERMES_PROVIDER="${HERMES_PROVIDER:-openai-codex}"
+HERMES_BASE_URL="${HERMES_BASE_URL:-https://chatgpt.com/backend-api/codex}"
+
+log() {
+  printf '\n==> %s\n' "$*"
+}
+
+die() {
+  printf 'ERROR: %s\n' "$*" >&2
+  exit 1
+}
+
+need_cmd() {
+  command -v "$1" >/dev/null 2>&1 || die "Missing required command: $1"
+}
+
+prompt() {
+  local var_name="$1"
+  local label="$2"
+  local default_value="${3:-}"
+  local value
+  if [[ -n "${!var_name:-}" ]]; then
+    return 0
+  fi
+  if [[ -n "${default_value}" ]]; then
+    printf '%s [%s]: ' "${label}" "${default_value}" >&2
+  else
+    printf '%s: ' "${label}" >&2
+  fi
+  IFS= read -r value
+  if [[ -z "${value}" ]]; then
+    value="${default_value}"
+  fi
+  export "${var_name}=${value}"
+}
+
+prompt_secret() {
+  local var_name="$1"
+  local label="$2"
+  local value
+  if [[ -n "${!var_name:-}" ]]; then
+    return 0
+  fi
+  printf '%s: ' "${label}" >&2
+  stty -echo
+  IFS= read -r value
+  stty echo
+  printf '\n' >&2
+  export "${var_name}=${value}"
+}
+
+yes_no() {
+  local var_name="$1"
+  local label="$2"
+  local default_value="${3:-yes}"
+  local value
+  if [[ -n "${!var_name:-}" ]]; then
+    return 0
+  fi
+  printf '%s [%s]: ' "${label}" "${default_value}" >&2
+  IFS= read -r value
+  value="${value:-${default_value}}"
+  value="$(printf '%s' "${value}" | tr '[:upper:]' '[:lower:]')"
+  case "${value}" in
+    y|yes|true|1) export "${var_name}=yes" ;;
+    n|no|false|0) export "${var_name}=no" ;;
+    *) die "Expected yes or no for ${label}" ;;
+  esac
+}
+
+validate_id_list() {
+  local name="$1"
+  local value="${!name:-}"
+  [[ -z "${value}" ]] && return 0
+  [[ "${value}" == *" "* ]] && die "${name} must be comma-separated without spaces"
+  return 0
+}
+
+install_hermes_if_needed() {
+  if [[ -x "${HERMES_BIN}" ]]; then
+    log "Hermes already installed: ${HERMES_BIN}"
+    return 0
+  fi
+
+  log "Installing Hermes Agent from NousResearch/hermes-agent (${HERMES_REF})"
+  curl -fsSL "https://raw.githubusercontent.com/NousResearch/hermes-agent/${HERMES_REF}/scripts/install.sh" \
+    | bash -s -- --skip-setup
+
+  [[ -x "${HERMES_BIN}" ]] || die "Hermes install completed but ${HERMES_BIN} was not found"
+}
+
+ensure_codex_login() {
+  if [[ "${HERMES_BRIDGE_DRY_RUN:-0}" == "1" ]]; then
+    log "Dry run: skipping OpenAI Codex auth check"
+    return 0
+  fi
+
+  if "${HERMES_BIN}" auth status openai-codex >/dev/null 2>&1; then
+    log "OpenAI Codex auth is already present"
+    return 0
+  fi
+
+  log "OpenAI Codex auth is not present"
+  if [[ "${HERMES_SKIP_CODEX_LOGIN:-}" == "1" ]]; then
+    printf 'Skipping login because HERMES_SKIP_CODEX_LOGIN=1\n' >&2
+    return 0
+  fi
+  printf 'A browser/device login may open now. Complete it to let Hermes use Codex.\n' >&2
+  "${HERMES_BIN}" login --provider openai-codex || {
+    printf 'Codex login did not complete. You can retry later with: %s login --provider openai-codex\n' "${HERMES_BIN}" >&2
+  }
+}
+
+collect_settings() {
+  yes_no ENABLE_SLACK "Configure Slack gateway?" "yes"
+  if [[ "${ENABLE_SLACK}" == "yes" ]]; then
+    prompt_secret SLACK_BOT_TOKEN "Slack Bot User OAuth Token (xoxb-...)"
+    prompt_secret SLACK_APP_TOKEN "Slack App-Level Token with connections:write (xapp-...)"
+    prompt SLACK_HOME_CHANNEL "Slack home channel ID (for example C0123456789)"
+    prompt SLACK_HOME_CHANNEL_NAME "Slack home channel name" "hermes-codex"
+    prompt SLACK_ALLOWED_CHANNELS "Slack allowed channel IDs, comma-separated" "${SLACK_HOME_CHANNEL}"
+    prompt SLACK_ALLOWED_USERS "Slack allowed user IDs, comma-separated"
+    [[ "${SLACK_BOT_TOKEN}" == xoxb-* ]] || die "SLACK_BOT_TOKEN must start with xoxb-"
+    [[ "${SLACK_APP_TOKEN}" == xapp-* ]] || die "SLACK_APP_TOKEN must start with xapp-"
+    validate_id_list SLACK_ALLOWED_CHANNELS
+    validate_id_list SLACK_ALLOWED_USERS
+  fi
+
+  yes_no ENABLE_DISCORD "Configure Discord gateway?" "yes"
+  if [[ "${ENABLE_DISCORD}" == "yes" ]]; then
+    prompt_secret DISCORD_BOT_TOKEN "Discord Bot Token"
+    prompt DISCORD_HOME_CHANNEL "Discord home channel ID"
+    prompt DISCORD_HOME_CHANNEL_NAME "Discord home channel name" "hermes-codex"
+    prompt DISCORD_ALLOWED_CHANNELS "Discord allowed channel IDs, comma-separated" "${DISCORD_HOME_CHANNEL}"
+    prompt DISCORD_ALLOWED_USERS "Discord allowed user IDs, comma-separated"
+    validate_id_list DISCORD_ALLOWED_CHANNELS
+    validate_id_list DISCORD_ALLOWED_USERS
+  fi
+}
+
+verify_remote_tokens() {
+  if [[ "${HERMES_BRIDGE_DRY_RUN:-0}" == "1" ]]; then
+    log "Dry run: skipping remote token verification"
+    return 0
+  fi
+
+  if [[ "${ENABLE_SLACK}" == "yes" && "${VERIFY_TOKENS:-1}" == "1" ]]; then
+    log "Verifying Slack bot token"
+    curl -fsS -H "Authorization: Bearer ${SLACK_BOT_TOKEN}" https://slack.com/api/auth.test \
+      | python3 -c 'import json,sys; data=json.load(sys.stdin); assert data.get("ok"), data; print("Slack bot:", data.get("user"), "team:", data.get("team"))'
+  fi
+
+  if [[ "${ENABLE_DISCORD}" == "yes" && "${VERIFY_TOKENS:-1}" == "1" ]]; then
+    log "Verifying Discord bot token and channel access"
+    curl -fsS -H "Authorization: Bot ${DISCORD_BOT_TOKEN}" https://discord.com/api/v10/users/@me \
+      | python3 -c 'import json,sys; data=json.load(sys.stdin); assert data.get("bot") is True, data; print("Discord bot:", data.get("username"), data.get("id"))'
+    curl -fsS -H "Authorization: Bot ${DISCORD_BOT_TOKEN}" "https://discord.com/api/v10/channels/${DISCORD_HOME_CHANNEL}" \
+      | python3 -c 'import json,sys; data=json.load(sys.stdin); print("Discord channel:", data.get("name"), data.get("id"))'
+  fi
+}
+
+write_env_and_config() {
+  log "Writing Hermes .env and config.yaml"
+  umask 077
+  mkdir -p "${HERMES_HOME}"
+
+  export HERMES_HOME HERMES_MODEL HERMES_PROVIDER HERMES_BASE_URL
+  python3 <<'PY'
+import os
+import stat
+import subprocess
+from pathlib import Path
+
+home = Path(os.environ["HERMES_HOME"]).expanduser()
+env_path = home / ".env"
+config_path = home / "config.yaml"
+
+updates = {
+    "HERMES_INFERENCE_MODEL": os.environ["HERMES_MODEL"],
+    "HERMES_INFERENCE_PROVIDER": os.environ["HERMES_PROVIDER"],
+}
+
+if os.environ.get("ENABLE_SLACK") == "yes":
+    updates.update({
+        "SLACK_BOT_TOKEN": os.environ["SLACK_BOT_TOKEN"],
+        "SLACK_APP_TOKEN": os.environ["SLACK_APP_TOKEN"],
+        "SLACK_HOME_CHANNEL": os.environ["SLACK_HOME_CHANNEL"],
+        "SLACK_HOME_CHANNEL_NAME": os.environ.get("SLACK_HOME_CHANNEL_NAME", "hermes-codex"),
+        "SLACK_ALLOWED_CHANNELS": os.environ.get("SLACK_ALLOWED_CHANNELS", os.environ["SLACK_HOME_CHANNEL"]),
+        "SLACK_ALLOWED_USERS": os.environ.get("SLACK_ALLOWED_USERS", ""),
+        "SLACK_ALLOW_ALL_USERS": "false",
+        "GATEWAY_ALLOW_ALL_USERS": "false",
+        "SLACK_REQUIRE_MENTION": "true",
+        "SLACK_STRICT_MENTION": "true",
+    })
+
+if os.environ.get("ENABLE_DISCORD") == "yes":
+    discord_channel = os.environ["DISCORD_HOME_CHANNEL"]
+    updates.update({
+        "DISCORD_BOT_TOKEN": os.environ["DISCORD_BOT_TOKEN"],
+        "DISCORD_HOME_CHANNEL": discord_channel,
+        "DISCORD_HOME_CHANNEL_NAME": os.environ.get("DISCORD_HOME_CHANNEL_NAME", "hermes-codex"),
+        "DISCORD_ALLOWED_CHANNELS": os.environ.get("DISCORD_ALLOWED_CHANNELS", discord_channel),
+        "DISCORD_ALLOWED_USERS": os.environ.get("DISCORD_ALLOWED_USERS", ""),
+        "DISCORD_REQUIRE_MENTION": "true",
+        "DISCORD_AUTO_THREAD": "false",
+        "DISCORD_NO_THREAD_CHANNELS": os.environ.get("DISCORD_ALLOWED_CHANNELS", discord_channel),
+        "DISCORD_REPLY_TO_MODE": "off",
+        "DISCORD_ALLOW_MENTION_EVERYONE": "false",
+        "DISCORD_ALLOW_MENTION_ROLES": "false",
+        "DISCORD_ALLOW_MENTION_USERS": "true",
+        "DISCORD_ALLOW_MENTION_REPLIED_USER": "false",
+    })
+
+lines = env_path.read_text().splitlines() if env_path.exists() else []
+seen = set()
+out = []
+for line in lines:
+    stripped = line.lstrip()
+    if not line or stripped.startswith("#") or "=" not in line:
+        out.append(line)
+        continue
+    key = line.split("=", 1)[0].strip()
+    if key in updates:
+        out.append(f"{key}={updates[key]}")
+        seen.add(key)
+    else:
+        out.append(line)
+for key, value in updates.items():
+    if key not in seen:
+        out.append(f"{key}={value}")
+env_path.write_text("\n".join(out).rstrip() + "\n")
+env_path.chmod(stat.S_IRUSR | stat.S_IWUSR)
+
+hermes_python = Path.home() / ".hermes" / "hermes-agent" / "venv" / "bin" / "python3"
+code = r'''
+import os
+from pathlib import Path
+import yaml
+
+config_path = Path(os.environ["CONFIG_PATH"])
+data = yaml.safe_load(config_path.read_text()) if config_path.exists() and config_path.read_text().strip() else {}
+if not isinstance(data, dict):
+    data = {}
+
+data.setdefault("model", {})
+data["model"]["default"] = os.environ["HERMES_MODEL"]
+data["model"]["provider"] = os.environ["HERMES_PROVIDER"]
+if os.environ.get("HERMES_BASE_URL"):
+    data["model"]["base_url"] = os.environ["HERMES_BASE_URL"]
+
+data["group_sessions_per_user"] = True
+data["unauthorized_dm_behavior"] = "ignore"
+
+if os.environ.get("ENABLE_SLACK") == "yes":
+    slack = data.setdefault("slack", {})
+    slack["require_mention"] = True
+    slack["strict_mention"] = True
+    slack["unauthorized_dm_behavior"] = "ignore"
+
+if os.environ.get("ENABLE_DISCORD") == "yes":
+    channels = [x.strip() for x in os.environ.get("DISCORD_ALLOWED_CHANNELS", "").split(",") if x.strip()]
+    discord = data.setdefault("discord", {})
+    discord["require_mention"] = True
+    discord["auto_thread"] = False
+    discord["allowed_channels"] = list(channels)
+    discord["no_thread_channels"] = list(channels)
+    discord["allow_mentions"] = {
+        "everyone": False,
+        "roles": False,
+        "users": True,
+        "replied_user": False,
+    }
+
+platforms = data.setdefault("platforms", {})
+if os.environ.get("ENABLE_SLACK") == "yes":
+    platforms["slack"] = {
+        "reply_to_mode": "first",
+        "extra": {
+            "reply_in_thread": False,
+            "reply_broadcast": False,
+            "force_channel_replies": True,
+        },
+    }
+if os.environ.get("ENABLE_DISCORD") == "yes":
+    platforms["discord"] = {"reply_to_mode": "off"}
+
+config_path.parent.mkdir(parents=True, exist_ok=True)
+config_path.write_text(yaml.safe_dump(data, sort_keys=False, allow_unicode=True))
+'''
+env = os.environ.copy()
+env["CONFIG_PATH"] = str(config_path)
+if hermes_python.exists():
+    subprocess.run([str(hermes_python), "-c", code], check=True, env=env)
+else:
+    subprocess.run(["python3", "-c", code], check=True, env=env)
+PY
+}
+
+install_gateway() {
+  if [[ "${HERMES_BRIDGE_DRY_RUN:-0}" == "1" ]]; then
+    log "Dry run: skipping gateway install/restart"
+    return 0
+  fi
+
+  log "Installing and restarting Hermes gateway service"
+  "${HERMES_BIN}" config check || true
+  "${HERMES_BIN}" gateway install --force
+  "${HERMES_BIN}" gateway restart
+  "${HERMES_BIN}" status
+}
+
+print_next_steps() {
+  log "Done"
+  cat <<EOF
+Hermes gateway is configured.
+
+Test:
+  Slack:   mention your Slack app in #${SLACK_HOME_CHANNEL_NAME:-hermes-codex}
+  Discord: mention your Discord app in #${DISCORD_HOME_CHANNEL_NAME:-hermes-codex}
+
+Useful commands:
+  ${HERMES_BIN} status
+  ${HERMES_BIN} logs --since 15m
+  tail -f ${HERMES_HOME}/logs/gateway.log
+EOF
+}
+
+main() {
+  [[ "$(uname -s)" == "Darwin" ]] || die "This bootstrap is currently intended for macOS"
+  need_cmd curl
+  need_cmd git
+  need_cmd python3
+
+  install_hermes_if_needed
+  collect_settings
+  verify_remote_tokens
+  write_env_and_config
+  ensure_codex_login
+  install_gateway
+  print_next_steps
+}
+
+main "$@"
