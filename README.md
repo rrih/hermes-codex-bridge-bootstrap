@@ -31,20 +31,27 @@ DISCORD_ALLOWED_USERS='123456789012345678' \
 
 ## 入力するもの
 
-Slack:
+ワンライナー実行中に聞かれる値は、各サービスの管理画面で作った Bot の token と、Bot に反応させたい channel / user の ID です。token は GitHub、Slack、Discord、チャットには貼らず、その Mac の入力プロンプトか環境変数だけで渡してください。
+
+### Slack
 
 - Bot User OAuth Token: `xoxb-...`
-- App-Level Token: `xapp-...`, `connections:write` 付き
-- Bot を常駐させる channel ID
-- Bot と話してよい Slack user ID
+- App-Level Token: `xapp-...`
+- Bot を常駐させる channel ID: `C...` または private channel の ID
+- Bot と話してよい Slack user ID: `U...`
 
-Discord:
+詳しい取得手順: [Slack app setup](docs/slack-app.md)
+
+### Discord
 
 - Discord Bot Token
-- Bot を常駐させる channel ID
-- Bot と話してよい Discord user ID
+- Bot を常駐させる channel ID: 数字だけの長い ID
+- Bot と話してよい Discord user ID: 数字だけの長い ID
+
+詳しい取得手順: [Discord app setup](docs/discord-app.md)
 
 channel / user はカンマ区切りで複数指定できます。
+既存の同じ Bot を別 MacBook でも使う場合は、token と ID は同じものを入力できます。
 
 ## 事前準備
 
