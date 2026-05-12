@@ -144,6 +144,8 @@ collect_settings() {
     validate_id_list DISCORD_ALLOWED_CHANNELS
     validate_id_list DISCORD_ALLOWED_USERS
   fi
+
+  yes_no ENABLE_COMPUTER_USE "Install/repair Computer Use for local Mac control?" "no"
 }
 
 verify_remote_tokens() {
@@ -293,6 +295,18 @@ if os.environ.get("ENABLE_SLACK") == "yes":
 if os.environ.get("ENABLE_DISCORD") == "yes":
     platforms["discord"] = {"reply_to_mode": "off"}
 
+if os.environ.get("ENABLE_COMPUTER_USE") == "yes":
+    platform_toolsets = data.setdefault("platform_toolsets", {})
+    explicit_platforms = ["cli"]
+    if os.environ.get("ENABLE_SLACK") == "yes":
+        explicit_platforms.append("slack")
+    if os.environ.get("ENABLE_DISCORD") == "yes":
+        explicit_platforms.append("discord")
+    for platform in explicit_platforms:
+        toolsets = platform_toolsets.get(platform)
+        if isinstance(toolsets, list) and "computer_use" not in toolsets:
+            toolsets.append("computer_use")
+
 config_path.parent.mkdir(parents=True, exist_ok=True)
 config_path.write_text(yaml.safe_dump(data, sort_keys=False, allow_unicode=True))
 '''
@@ -303,6 +317,33 @@ if hermes_python.exists():
 else:
     subprocess.run(["python3", "-c", code], check=True, env=env)
 PY
+}
+
+install_computer_use_if_requested() {
+  if [[ "${ENABLE_COMPUTER_USE:-no}" != "yes" ]]; then
+    return 0
+  fi
+
+  if [[ "${HERMES_BRIDGE_DRY_RUN:-0}" == "1" ]]; then
+    log "Dry run: skipping Computer Use install"
+    return 0
+  fi
+
+  log "Installing or repairing Computer Use (cua-driver)"
+  "${HERMES_BIN}" tools enable computer_use --platform cli || true
+  if [[ "${ENABLE_SLACK:-no}" == "yes" ]]; then
+    "${HERMES_BIN}" tools enable computer_use --platform slack || true
+  fi
+  if [[ "${ENABLE_DISCORD:-no}" == "yes" ]]; then
+    "${HERMES_BIN}" tools enable computer_use --platform discord || true
+  fi
+
+  "${HERMES_BIN}" computer-use install
+
+  if command -v cua-driver >/dev/null 2>&1; then
+    open -n -g -a CuaDriver --args serve || true
+    cua-driver check_permissions || true
+  fi
 }
 
 install_gateway() {
@@ -332,6 +373,14 @@ Useful commands:
   ${HERMES_BIN} logs --since 15m
   tail -f ${HERMES_HOME}/logs/gateway.log
 EOF
+  if [[ "${ENABLE_COMPUTER_USE:-no}" == "yes" ]]; then
+    cat <<EOF
+Computer Use:
+  ${HERMES_BIN} computer-use status
+  open -n -g -a CuaDriver --args serve
+  cua-driver check_permissions
+EOF
+  fi
 }
 
 main() {
@@ -345,6 +394,7 @@ main() {
   verify_remote_tokens
   write_env_and_config
   ensure_codex_login
+  install_computer_use_if_requested
   install_gateway
   print_next_steps
 }

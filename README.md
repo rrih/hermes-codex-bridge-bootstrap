@@ -7,6 +7,7 @@ macOS で [NousResearch/hermes-agent](https://github.com/NousResearch/hermes-age
 - Hermes のインストール確認
 - OpenAI Codex provider のログイン確認
 - Slack / Discord token と許可 channel / user の設定
+- 任意で Computer Use 用の `cua-driver` インストールと確認
 - `~/.hermes/.env` と `~/.hermes/config.yaml` の更新
 - macOS `launchd` gateway の install / restart
 
@@ -26,6 +27,7 @@ SLACK_ALLOWED_USERS='U...' \
 DISCORD_BOT_TOKEN='...' \
 DISCORD_HOME_CHANNEL='123456789012345678' \
 DISCORD_ALLOWED_USERS='123456789012345678' \
+ENABLE_COMPUTER_USE='yes' \
 /bin/zsh -c 'set -e; repo="${HERMES_BRIDGE_DIR:-$HOME/.local/share/hermes-codex-bridge-bootstrap}"; if [ -d "$repo/.git" ]; then git -C "$repo" pull --ff-only; else git clone --depth 1 https://github.com/rrih/hermes-codex-bridge-bootstrap.git "$repo"; fi; "$repo/bin/bootstrap"'
 ```
 
@@ -53,6 +55,19 @@ DISCORD_ALLOWED_USERS='123456789012345678' \
 channel / user はカンマ区切りで複数指定できます。
 既存の同じ Bot を別 MacBook でも使う場合は、token と ID は同じものを入力できます。
 
+### Computer Use
+
+スマホから Discord 経由でローカル Mac を操作したい場合は、bootstrap の質問 `Install/repair Computer Use for local Mac control?` に `yes` と答えます。非対話実行では `ENABLE_COMPUTER_USE=yes` を渡します。
+
+この設定では Hermes の `computer_use` toolset と `cua-driver` を使います。導入後、macOS の許可が必要です。
+
+```sh
+open -n -g -a CuaDriver --args serve
+cua-driver check_permissions
+```
+
+`Accessibility` と `Screen Recording` が未許可なら、System Settings > Privacy & Security で `CuaDriver.app` を許可してください。
+
 ## 事前準備
 
 Slack と Discord のアプリ自体は、各サービスの管理画面で token を発行する必要があります。最小手順は以下です。
@@ -71,6 +86,7 @@ Slack と Discord のアプリ自体は、各サービスの管理画面で toke
 - user allowlist を設定
 - `launchd` で Hermes gateway を常駐
 - model は既定で `openai-codex` / `gpt-5.5`
+- `ENABLE_COMPUTER_USE=yes` の場合は `cua-driver` を導入し、既存の明示的な platform toolset 設定に `computer_use` を追加
 
 ## 確認
 
@@ -81,6 +97,20 @@ tail -f ~/.hermes/logs/gateway.log
 ```
 
 Slack / Discord の対象チャンネルで bot に mention して `ping` を送ると、gateway ログに `inbound message` と `Sending response` が出ます。
+
+Computer Use を入れた場合、まずは読み取りだけを試してください。
+
+```text
+@bot Computer UseでMacのアプリ一覧を確認して。クリックや入力はしないで。
+```
+
+次に、画面取得だけを試します。
+
+```text
+@bot Computer UseでSafariをcaptureして、画面に見えている要素だけ説明して。クリックや入力はしないで。
+```
+
+クリック、入力、送信、削除、購入、設定変更などはローカルPCへの実操作です。Discord は private channel にして、`DISCORD_ALLOWED_USERS` と `DISCORD_ALLOWED_CHANNELS` を必ず絞ってください。
 
 ## Dry Run
 

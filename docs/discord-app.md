@@ -51,6 +51,17 @@ private channel を作り、見せたいユーザーと Bot だけを追加し�
 
 Hermes 側ではさらに `DISCORD_ALLOWED_CHANNELS` と `DISCORD_ALLOWED_USERS` で応答範囲を絞ります。
 
+Computer Use を使う場合は、必ず private channel で運用してください。Discord 経由の Computer Use はローカル Mac のクリック、入力、スクロール、画面取得に直結します。Bot を見える範囲と、応答できる user / channel は Discord 側の権限と Hermes 側の allowlist の両方で絞ります。
+
+bootstrap で `ENABLE_COMPUTER_USE=yes` を指定すると、Hermes の `computer_use` toolset と `cua-driver` の導入を試みます。導入後、Mac 側で以下を確認します。
+
+```sh
+open -n -g -a CuaDriver --args serve
+cua-driver check_permissions
+```
+
+`Accessibility` と `Screen Recording` が許可されていない場合は、System Settings > Privacy & Security で `CuaDriver.app` を許可します。
+
 ## `DISCORD_HOME_CHANNEL` / `DISCORD_ALLOWED_CHANNELS` を取得する
 
 1. Discord Desktop App で `User Settings` を開きます。
@@ -85,3 +96,4 @@ Hermes 側ではさらに `DISCORD_ALLOWED_CHANNELS` と `DISCORD_ALLOWED_USERS`
 - token を `Reset Token` すると古い token は無効になります。その場合は各 MacBook で再入力してください。
 - private channel で使う場合、Discord 側でも Bot と許可ユーザーだけが見えるように channel 権限を設定してください。
 - `Message Content Intent` が OFF のままだと、Bot がメッセージ本文を読めず応答できないことがあります。
+- Computer Use の初回確認は、アプリ一覧や画面 capture など読み取りだけで試してください。クリック、入力、送信、削除、購入、設定変更は実操作なので、意図が明確な時だけ依頼してください。
